@@ -1,4 +1,4 @@
-import { createSlice, type PayloadAction } from "@reduxjs/toolkit"
+import { createAction, createSlice, type PayloadAction } from "@reduxjs/toolkit"
 import {
   CONNECTED,
   CONNECTING,
@@ -13,6 +13,7 @@ import {
   type EndpointType
 } from "@common/src/constants"
 import * as R from "ramda"
+import type { CatalogConnection } from "@common/src/connection-catalog"
 import type { NodeRole } from "@/state/valkey-features/cluster/clusterSlice"
 import { secureStorage } from "@/utils/secureStorage"
 
@@ -64,6 +65,11 @@ interface ConnectionHistoryEntry {
 }
 
 export interface ConnectionState {
+  /** Metadata supplied by the server catalog; does not grant session authorization. */
+  preconfigured?: true;
+  catalogId?: string;
+  catalogRevision?: string;
+  sourceConnectionDetails?: CatalogConnection["connectionDetails"];
   status: ConnectionStatus;
   errorMessage: string | null;
   connectionDetails: ConnectionDetails;
@@ -83,6 +89,7 @@ export interface ValkeyConnectionsState {
 
 // determine a connections eligibility for auto-resume
 export const isAutoResumeEligible = (connection: ConnectionState): boolean => {
+  if (connection.preconfigured) return false
   const { status, connectionHistory, userDisconnected, connectionDetails } = connection
   if (status === CONNECTED || status === CONNECTING) return false
   if ((connectionHistory?.length ?? 0) === 0) return false
@@ -131,10 +138,60 @@ const connectionSlice = createSlice({
     connections: currentConnections as ValkeyConnectionsState,
   },
   reducers: {
+    catalogApplied: (state, action: PayloadAction<{ connections: CatalogConnection[] }>) => {
+      for (const entry of action.payload.connections) {
+        const { connectionId, connectionDetails, sourceConnectionDetails = connectionDetails, catalogId = connectionId, revision } = entry
+        const existing = Object.values(state.connections).find((entry) => entry.preconfigured && entry.catalogId === catalogId)
+        if (existing) {
+          // Display changes must not overwrite the resolved node or its live session state.
+          if (existing.connectionDetails.alias !== connectionDetails.alias) {
+            existing.connectionDetails.alias = connectionDetails.alias
+            if (existing.sourceConnectionDetails) existing.sourceConnectionDetails.alias = connectionDetails.alias
+            existing.searchableText = buildSearchableText(connectionId, existing.connectionDetails)
+          }
+          continue
+        }
+        // Preserve existing connections and pending connection attempts.
+        if (state.connections[connectionId] || Object.values(state.connections).some((entry) => entry.catalogId === catalogId)) continue
+        state.connections[connectionId] = {
+          preconfigured: true,
+          catalogId,
+          catalogRevision: revision,
+          sourceConnectionDetails,
+          status: NOT_CONNECTED,
+          errorMessage: null,
+          connectionDetails,
+          searchableText: buildSearchableText(connectionId, connectionDetails),
+          connectionHistory: [],
+        }
+      }
+    },
+    catalogEntryRemoved: (state, action: PayloadAction<{ connectionId: string }>) => {
+      delete state.connections[action.payload.connectionId]
+    },
+    catalogNodeResolved: (state, action: PayloadAction<{
+      catalogId: string; connectionId: string; connectionDetails: ConnectionDetails;
+      sourceConnectionDetails?: CatalogConnection["connectionDetails"]; revision?: string
+    }>) => {
+      const { catalogId, connectionId, connectionDetails } = action.payload
+      const source = Object.entries(state.connections).find(([, entry]) => entry.preconfigured && entry.catalogId === catalogId)
+      if (!source || (state.connections[connectionId] && source[0] !== connectionId)) return
+      const [sourceId, entry] = source
+      delete state.connections[sourceId]
+      state.connections[connectionId] = {
+        ...entry,
+        ...(action.payload.revision !== undefined && { catalogRevision: action.payload.revision }),
+        ...(action.payload.sourceConnectionDetails && { sourceConnectionDetails: action.payload.sourceConnectionDetails }),
+        connectionDetails: { ...entry.connectionDetails, host: connectionDetails.host, port: connectionDetails.port, endpointType: "node" },
+        searchableText: buildSearchableText(connectionId, connectionDetails),
+      }
+    },
     connectPending: (
       state,
       action: PayloadAction<{
         connectionId: string;
+        catalogId?: string;
+        discoveryId?: string;
         connectionDetails: ConnectionDetails;
         isRetry?: boolean;
         isResume?: boolean;
@@ -156,6 +213,11 @@ const connectionSlice = createSlice({
       const existingConnection = state.connections[connectionId]
 
       state.connections[connectionId] = {
+        ...(existingConnection?.preconfigured && (action.payload.catalogId === existingConnection.catalogId
+          || action.payload.isResume || isRetry || autoConnect) && {
+          preconfigured: true, catalogId: existingConnection.catalogId, catalogRevision: existingConnection.catalogRevision,
+          sourceConnectionDetails: existingConnection.sourceConnectionDetails,
+        }),
         status: CONNECTING,
         errorMessage: isRetry && existingConnection?.errorMessage ? existingConnection.errorMessage : null,
         connectionDetails: {
@@ -302,7 +364,11 @@ const connectionSlice = createSlice({
 })
 
 export default connectionSlice.reducer
+export const catalogFulfilled = createAction<{ connections: CatalogConnection[] }>(VALKEY.CONNECTION.catalogFulfilled)
 export const {
+  catalogApplied,
+  catalogEntryRemoved,
+  catalogNodeResolved,
   connectPending,
   standaloneConnectFulfilled,
   clusterConnectFulfilled,

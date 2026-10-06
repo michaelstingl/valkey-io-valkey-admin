@@ -12,6 +12,7 @@ import {
   standaloneConnectFulfilled,
   clusterConnectFulfilled,
   connectPending,
+  catalogNodeResolved,
   deleteConnection,
   connectRejected,
   startRetry,
@@ -26,6 +27,8 @@ import {
 import {
   discoveryEndpointPending,
   discoveryEndpointFulfilled,
+  discoveryEndpointRejected,
+  clearEndpointDiscovery,
   discoveryNodeConnecting
 } from "../valkey-features/topology/topologySlice"
 import { sendRequested, sendFulfilled, sendFailed, setCommandHistoryLimit, type CommandState } from "../valkey-features/command/commandSlice"
@@ -57,7 +60,7 @@ const getCurrentConnections = () => R.pipe(
 // not persisted either. All persistence writes must go through this.
 export const persistConnections = (connections: Record<string, ConnectionState>) => {
   const safe = Object.fromEntries(
-    Object.entries(connections).map(([id, conn]) => {
+    Object.entries(connections).filter(([, conn]) => !conn.preconfigured).map(([id, conn]) => {
       if (conn?.isPasswordEncrypted === false) {
         const stripped = { ...conn, connectionDetails: { ...conn.connectionDetails, password: undefined } }
         delete stripped.isPasswordEncrypted
@@ -111,6 +114,7 @@ export const connectionEpic = (store: Store) =>
           const baseConnectionDetails = connection?.connectionDetails
 
           const connectionToSave = {
+            preconfigured: connection?.preconfigured,
             connectionDetails: baseConnectionDetails,
             status: NOT_CONNECTED,
             connectionHistory: connection?.connectionHistory ?? [],
@@ -162,13 +166,35 @@ export const connectionEpic = (store: Store) =>
         const state = store.getState()
         const discovery = state.valkeyTopology?.discoveries?.[discoveryId]
         if (!discovery) return
+        if (discovery.catalogId && !Object.values(state.valkeyConnection.connections as Record<string, ConnectionState>)
+          .some((entry) => entry.preconfigured && entry.catalogId === discovery.catalogId)) {
+          store.dispatch(clearEndpointDiscovery({ discoveryId }))
+          return
+        }
 
         const firstNode = Object.values(clusterNodes)[0]
         if (!firstNode) return
 
         const connectionId = buildConnectionId(firstNode.host, firstNode.port, discovery.connectionDetails.db)
+        if (discovery.catalogId) {
+          const existing = state.valkeyConnection.connections[connectionId]
+          if (existing && existing.catalogId !== discovery.catalogId) {
+            store.dispatch(discoveryEndpointRejected({
+              discoveryId, errorMessage: "This node already has a connection. Use the existing connection.",
+            }))
+            return
+          }
+          store.dispatch(catalogNodeResolved({
+            catalogId: discovery.catalogId, connectionId,
+            connectionDetails: { ...discovery.connectionDetails, host: firstNode.host, port: String(firstNode.port) },
+            sourceConnectionDetails: { ...R.omit(["password"], discovery.connectionDetails as ConnectionState["connectionDetails"]),
+              authType: "password" },
+            revision: discovery.catalogRevision,
+          }))
+        }
         store.dispatch(connectPending({
           connectionId,
+          ...(discovery.catalogId && { catalogId: discovery.catalogId, discoveryId }),
           connectionDetails: {
             ...discovery.connectionDetails,
             host: firstNode.host,
@@ -178,7 +204,8 @@ export const connectionEpic = (store: Store) =>
           isPasswordEncrypted: discovery.isPasswordEncrypted,
         }))
         // store the connectionId in the discovery state so we can show the correct connection status
-        store.dispatch(discoveryNodeConnecting({ discoveryId, connectionId }))
+        if (discovery.catalogId) store.dispatch(clearEndpointDiscovery({ discoveryId }))
+        else store.dispatch(discoveryNodeConnecting({ discoveryId, connectionId }))
       }),
       ignoreElements(),
     ),
@@ -300,6 +327,7 @@ export const autoReconnectEpic = (store: Store) =>
 
       // since IAM and non-password connection has no secret, they can be reconnected automatically
       const disconnectedConnections = Object.entries(connections)
+        .filter(([, connection]) => !connection.preconfigured)
         .filter(([, connection]) => connection.status === DISCONNECTED)
         .filter(([, connection]) =>
           R.isNotNil(connection.connectionDetails.password) ||
@@ -749,4 +777,3 @@ export const metricsReadinessRetryEpic = (store: Store) =>
       ),
     ),
   )
-

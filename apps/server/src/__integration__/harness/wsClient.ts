@@ -19,18 +19,23 @@ export class WsClient {
   }> = []
   private closed = false
 
-  private constructor(socket: WebSocket) {
+  private constructor(socket: WebSocket, readonly sessionCookie?: string) {
     this.socket = socket
     socket.on("message", (data) => this.onMessage(data))
     socket.on("close", () => this.onClose())
     socket.on("error", (err) => this.onError(err))
   }
 
-  static connect(url: string, timeoutMs = 10000): Promise<WsClient> {
+  static connect(url: string, timeoutMs = 10000, options: { cookie?: string } = {}): Promise<WsClient> {
     return new Promise((resolve, reject) => {
       const { protocol, host } = new URL(url)
       const socket = new WebSocket(url, {
         origin: `${protocol === "wss:" ? "https:" : "http:"}//${host}`,
+        ...(options.cookie && { headers: { Cookie: options.cookie } }),
+      })
+      let sessionCookie: string | undefined
+      socket.once("upgrade", (response) => {
+        sessionCookie = response.headers["set-cookie"]?.map((value) => value.split(";")[0]).join("; ")
       })
       const timer = setTimeout(() => {
         socket.terminate()
@@ -39,7 +44,7 @@ export class WsClient {
 
       socket.once("open", () => {
         clearTimeout(timer)
-        resolve(new WsClient(socket))
+        resolve(new WsClient(socket, sessionCookie))
       })
       socket.once("error", (err) => {
         clearTimeout(timer)

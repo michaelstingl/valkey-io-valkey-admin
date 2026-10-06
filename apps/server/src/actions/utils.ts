@@ -1,9 +1,10 @@
 import { type GlideClient, type GlideClusterClient } from "@valkey/valkey-glide"
-import { FETCH_TIMEOUT_MS } from "valkey-common"
+import { FETCH_TIMEOUT_MS, type CatalogConnection } from "valkey-common"
 import { ClusterNodeMap, MetricsServerMap } from "../metrics-orchestrator"
 import type WebSocket from "ws"
 
 export type Deps = {
+  catalog?: CatalogConnection[]
   ws: WebSocket
   clients: Map<string, {client: GlideClient | GlideClusterClient, clusterId?: string}>
   connectionId: string,

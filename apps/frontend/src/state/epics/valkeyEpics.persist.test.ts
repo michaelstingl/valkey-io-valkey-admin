@@ -1,3 +1,4 @@
+import { beforeEach, describe, expect, it } from "vitest"
 import { LOCAL_STORAGE } from "@common/src/constants"
 import { persistConnections } from "./valkeyEpics"
 import type { ConnectionState } from "@/state/valkey-features/connection/connectionSlice"
@@ -18,6 +19,11 @@ describe("persistConnections", () => {
       password: "secret",
     },
     ...overrides,
+  })
+
+  it("keeps preconfigured entries out of browser persistence while preserving manual connections", () => {
+    persistConnections({ preconfigured: conn({ preconfigured: true }), manual: conn({ isPasswordEncrypted: false }) })
+    expect(Object.keys(read())).toEqual(["manual"])
   })
 
   it("strips the password and drops the flag when the password is unencrypted", () => {

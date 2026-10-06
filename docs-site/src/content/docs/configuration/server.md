@@ -5,7 +5,61 @@ description: Configuration for the apps/server process
 
 The `apps/server` process is the heart of Valkey Admin. It serves the built frontend, accepts WebSocket connections from the UI, exposes the `/orchestrator` REST router, and — depending on how it is configured — either spawns one metrics child per connection on demand, or runs a long-lived reconcile loop that discovers cluster nodes and tracks externally-managed metrics processes.
 
-The server has no config file. Everything below is read from `process.env` at startup, in `apps/server/src/index.ts` and `apps/server/src/metrics-orchestrator.ts`.
+Server settings below are read from `process.env` at startup, in `apps/server/src/index.ts` and `apps/server/src/metrics-orchestrator.ts`. The optional connection catalog below supplies preconfigured connections and is refreshed at runtime.
+
+## Preconfigured Connections
+
+In `DEPLOYMENT_MODE=Web`, set `VALKEY_ADMIN_CONNECTIONS_FILE` to a readable JSON catalog. Deployment tooling or an external discovery process can update this file. All visitors see the same configured endpoints and supply their own Valkey passwords.
+
+Other deployment modes ignore `VALKEY_ADMIN_CONNECTIONS_FILE`.
+
+For example, mount a ConfigMap at `/catalog/connections.json` and set `VALKEY_ADMIN_CONNECTIONS_FILE=/catalog/connections.json`:
+
+```json
+[
+  {
+    "host": "valkey-blue.valkey-lab.svc.cluster.local",
+    "port": "6379",
+    "username": "default",
+    "alias": "blue",
+    "endpointType": "cluster-endpoint",
+    "tls": false,
+    "db": 0
+  }
+]
+```
+
+### Catalog fields
+
+Each entry requires `host` and `port`, both strings. Optional fields:
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `id` | Stable catalog entry ID | Derived from host, port and database |
+| `username` | Prefilled Valkey username | Unset |
+| `alias` | Display name | Unset |
+| `tls` | Use TLS | `false` |
+| `verifyTlsCertificate` | Verify the TLS certificate | `true` |
+| `endpointType` | `node` or `cluster-endpoint` | `node` |
+| `db` | Non-negative integer database index | `0` |
+
+Credential fields and unknown fields are ignored. Duplicate IDs or host/port/database combinations are rejected. Assign a new `id` when replacing a resource at the same endpoint, for example its Kubernetes UID.
+
+### Updates
+
+The server validates the configured file at startup. An unreadable or invalid file prevents startup; later read or validation errors retain the last valid catalog and log a warning. Without `VALKEY_ADMIN_CONNECTIONS_FILE`, the catalog is empty. Replace the file atomically when updating it.
+
+Catalog requests share a cached snapshot. The server rereads the file at most once per second, regardless of the number of connected browsers.
+
+The Web UI refreshes the catalog when its WebSocket opens and every three seconds while connected. Additions, updates and removals appear without restarting valkey-admin. Unchanged entries and alias changes preserve active connections. Removing an entry or changing its connection settings disconnects the affected preconfigured connection.
+
+### Connecting
+
+Select Connect, keep or change the prefilled username, and enter a password. The username override applies to that connection only. Preconfigured entries have no Edit or Delete action. Discovery Endpoints connect to the first discovered node; an explicit reconnect repeats discovery through the configured endpoint.
+
+Manually added connections take precedence for the same host, port and database, regardless of which entry was added first. Such connections are no longer updated or removed by the catalog. Removing a catalog entry does not prevent users from adding a manual connection to that endpoint.
+
+Active connections resume after page reload or WebSocket reconnect while the server session and authenticated client remain valid. Passwords and preconfigured entries are not stored in browser localStorage. Explicit disconnect prevents automatic resume. A new session or server restart requires authentication again.
 
 ## Picking a Mode
 

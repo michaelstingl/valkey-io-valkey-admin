@@ -120,9 +120,9 @@ export const ConnectionEntry = ({
               isConnected={isConnected}
               isConnecting={isConnecting}
               onConnect={handleConnect}
-              onDelete={handleDelete}
+              onDelete={connection.preconfigured ? undefined : handleDelete}
               onDisconnect={handleDisconnect}
-              onEdit={handleEdit}
+              onEdit={connection.preconfigured ? undefined : handleEdit}
             />
           </div>
         </div>
@@ -188,9 +188,9 @@ export const ConnectionEntry = ({
             isConnected={isConnected}
             isConnecting={isConnecting}
             onConnect={handleConnect}
-            onDelete={handleDelete}
+            onDelete={connection.preconfigured ? undefined : handleDelete}
             onDisconnect={handleDisconnect}
-            onEdit={handleEdit}
+            onEdit={connection.preconfigured ? undefined : handleEdit}
           />
         </div>
       </div>

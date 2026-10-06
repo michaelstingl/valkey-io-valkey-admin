@@ -5,8 +5,16 @@ const SESSION_COOKIE_NAME = "vk_sid"
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
 const SWEEP_INTERVAL_MS = 60 * 1000
 
+type CatalogDiscovery = {
+  discoveryId: string
+  revision?: string
+  node?: { host: string; port: string; username?: string }
+}
+
 type Session = {
   connectionIds: Set<string>
+  catalogNodes?: Map<string, { host: string; port: string; username?: string; revision?: string }>
+  catalogDiscoveries?: Map<string, CatalogDiscovery>
   expireAt: number
 }
 
@@ -92,6 +100,32 @@ export const isConnectionAuthorized = (sessionId: string | undefined, connection
 export const revokeConnection = (sessionId: string | undefined, connectionId: string): void => {
   getSession(sessionId)?.connectionIds.delete(connectionId)
 }
+
+// Connection metadata only; a catalog-to-node binding never grants session authorization.
+export const rememberCatalogNode = (
+  sessionId: string | undefined, catalogId: string, node: { host: string; port: string; username?: string }, revision?: string,
+): void => {
+  const session = getSession(sessionId)
+  if (!session) return
+  session.catalogNodes ??= new Map()
+  session.catalogNodes.set(catalogId, { host: node.host, port: node.port, username: node.username, revision })
+}
+
+export const getCatalogNode = (sessionId: string | undefined, catalogId: string) =>
+  getSession(sessionId)?.catalogNodes?.get(catalogId)
+
+// A pending discovery never replaces the authenticated catalog-to-node binding.
+export const beginCatalogDiscovery = (sessionId: string | undefined, catalogId: string, discoveryId: string, revision?: string) => {
+  const session = getSession(sessionId)
+  if (!session) return undefined
+  const attempt: CatalogDiscovery = { discoveryId, revision }
+  session.catalogDiscoveries ??= new Map()
+  session.catalogDiscoveries.set(catalogId, attempt)
+  return attempt
+}
+
+export const getCatalogDiscovery = (sessionId: string | undefined, catalogId: string) =>
+  getSession(sessionId)?.catalogDiscoveries?.get(catalogId)
 
 // check if a connection is authorized by any session, not just the one provided
 export const hasAuthorizedSession = (connectionId: string): boolean => {

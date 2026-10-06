@@ -15,6 +15,21 @@ volumes:
 
 
 services:
+  # Dedicated ACL fixture avoids sharing authenticated clients with other suites.
+  valkey-catalog:
+    image: valkey/valkey:latest
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    command: [valkey-server, --aclfile, /catalog/users.acl, --ignore-warnings, ARM64-COW-BUG]
+    volumes:
+      - ./test-catalog:/catalog:ro
+    healthcheck:
+      test: [CMD, valkey-cli, --user, reader, -a, catalog-reader-password, PING]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+    networks:
+      - appnet
+
   # ---------------- Standalone Valkey (used by db-aware integration tests) ----------------
   # A plain (non-cluster) Valkey instance reachable from the app on the same
   # docker network. The integration test in
@@ -286,6 +301,7 @@ services:
       dockerfile: ./docker/Dockerfile.app
     environment:
       DEPLOYMENT_MODE: Web
+      VALKEY_ADMIN_CONNECTIONS_FILE: /catalog/connections.json
       NODE_ENV: production
       VALKEY_HOST: valkey-7001
       VALKEY_PORT: "7001"
@@ -293,6 +309,8 @@ services:
       VALKEY_PASSWORD: admin
       VALKEY_TLS: "false"
       VALKEY_VERIFY_CERT: "false"
+    volumes:
+      - ./test-catalog:/catalog:ro
     ports:
       - "8080:8080"
     networks:
@@ -305,6 +323,6 @@ services:
       - valkey-7005
       - valkey-7006
       - valkey-standalone
+      - valkey-catalog
       - cluster-init
       - populate
-      

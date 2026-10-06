@@ -9,7 +9,9 @@ import {
   filter,
   switchMap,
   retry,
-  take
+  take,
+  takeUntil,
+  endWith
 } from "rxjs/operators"
 import { CONNECTED, CONNECTING, VALKEY, RETRY_CONFIG, retryDelay } from "@common/src/constants.ts"
 import { action$ } from "../middleware/rxjsMiddleware/rxjsMiddleware"
@@ -127,7 +129,8 @@ const emitActions = (store: Store) =>
         return EMPTY
       }
 
-      return socket$.pipe(
+      const socket = socket$
+      return merge(socket.pipe(
         tap((message) => {
           console.log("[WebSocket] Incoming message:", message)
           store.dispatch(message)
@@ -148,7 +151,14 @@ const emitActions = (store: Store) =>
           return EMPTY
         }),
         ignoreElements(),
-      )
+      ), window.location.protocol === "file:" ? EMPTY : timer(0, 3000).pipe(
+        // Stop on close/error and restart with the next socket. Subscribe to replies first.
+        takeUntil(socket.pipe(ignoreElements(), endWith(true), catchError(() => of(true)))),
+        tap(() => {
+          socket.next({ type: VALKEY.CONNECTION.catalogRequested, payload: undefined })
+        }),
+        ignoreElements(),
+      ))
     }),
   )
 

@@ -10,6 +10,8 @@ export interface DiscoveredNode {
 export type DiscoveryStatus = "pending" | "fulfilled" | "node_connecting" | "rejected"
 
 export interface DiscoveryState {
+  catalogId?: string
+  catalogRevision?: string
   status: DiscoveryStatus
   connectionDetails: ConnectionDetails
   isPasswordEncrypted?: boolean
@@ -32,24 +34,30 @@ const topologySlice = createSlice({
   reducers: {
     discoveryEndpointPending: (
       state,
-      action: PayloadAction<{ discoveryId: string; connectionDetails: ConnectionDetails; isPasswordEncrypted?: boolean }>,
+      action: PayloadAction<{ discoveryId: string; connectionDetails: ConnectionDetails; isPasswordEncrypted?: boolean; catalogId?: string }>,
     ) => {
       const { discoveryId, connectionDetails, isPasswordEncrypted } = action.payload
       state.discoveries[discoveryId] = {
         status: "pending",
         connectionDetails,
         isPasswordEncrypted,
+        catalogId: action.payload.catalogId,
       }
     },
     discoveryEndpointFulfilled: (
       state,
-      action: PayloadAction<{ discoveryId: string; clusterNodes: Record<string, DiscoveredNode> }>,
+      action: PayloadAction<{ discoveryId: string; clusterNodes: Record<string, DiscoveredNode>;
+        connectionDetails?: ConnectionDetails; catalogRevision?: string }>,
     ) => {
       const { discoveryId, clusterNodes } = action.payload
       const entry = state.discoveries[discoveryId]
       if (!entry) return
       entry.status = "fulfilled"
       entry.clusterNodes = clusterNodes
+      if (entry.catalogId && action.payload.connectionDetails) {
+        entry.connectionDetails = { ...action.payload.connectionDetails, password: entry.connectionDetails.password }
+        entry.catalogRevision = action.payload.catalogRevision
+      }
       entry.errorMessage = undefined
     },
     discoveryEndpointRejected: (
@@ -61,6 +69,7 @@ const topologySlice = createSlice({
       if (!entry) return
       entry.status = "rejected"
       entry.errorMessage = errorMessage
+      if (entry.catalogId) delete entry.connectionDetails.password
     },
     discoveryNodeConnecting: (
       state,

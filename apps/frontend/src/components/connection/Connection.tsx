@@ -1,5 +1,6 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useSelector } from "react-redux"
+import { nanoid } from "@reduxjs/toolkit"
 import { HousePlug } from "lucide-react"
 import { CONNECTED, CONNECTING, MAX_CONNECTIONS, RECONNECTING } from "@common/src/constants.ts"
 import { toast } from "sonner"
@@ -13,12 +14,16 @@ import { LoadingState } from "../ui/loading-state.tsx"
 import { SearchInput } from "../ui/search-input.tsx"
 import { Typography } from "../ui/typography.tsx"
 import { wasRefreshedFrom } from "@/history.ts"
-import { type ConnectionState, connectPending } from "@/state/valkey-features/connection/connectionSlice.ts"
-import { selectConnections } from "@/state/valkey-features/connection/connectionSelectors.ts"
+import { type ConnectionState } from "@/state/valkey-features/connection/connectionSlice.ts"
+import {
+  selectConnections, selectPromptedConnection, selectPromptDiscovery, type ConnectionPrompt
+} from "@/state/valkey-features/connection/connectionSelectors.ts"
 import { ConnectionEntry } from "@/components/connection/ConnectionEntry.tsx"
 import { ClusterConnectionGroup } from "@/components/connection/ClusterConnectionGroup.tsx"
 import { useAppDispatch } from "@/hooks/hooks.ts"
 import { secureStorage, PASSWORD_NOT_STORED_WARNING } from "@/utils/secureStorage.ts"
+import { clearEndpointDiscovery } from "@/state/valkey-features/topology/topologySlice"
+import { passwordConnectionRequested } from "@/state/epics/passwordConnectionEpic"
 
 const matchesSearch = (q: string, connection: ConnectionState) =>
   connection.searchableText.includes(q)
@@ -29,8 +34,14 @@ export function Connection() {
   const [showEditForm, setShowEditForm] = useState(false)
   const [editingConnectionId, setEditingConnectionId] = useState<string | undefined>(undefined)
   const [searchQuery, setSearchQuery] = useState("")
-  const [passwordPromptConnectionId, setPasswordPromptConnectionId] = useState<string | undefined>(undefined)
+  const [passwordPrompt, setPasswordPrompt] = useState<ConnectionPrompt | undefined>(undefined)
   const connections = useSelector(selectConnections)
+  const [discoveryId, setDiscoveryId] = useState<string | undefined>(undefined)
+  const discovery = useSelector(selectPromptDiscovery(discoveryId))
+  const promptedConnection = useSelector(selectPromptedConnection(passwordPrompt))
+  useEffect(() => () => {
+    if (discoveryId) dispatch(clearEndpointDiscovery({ discoveryId }))
+  }, [dispatch, discoveryId])
 
   const handleEditConnection = (connectionId: string) => {
     setEditingConnectionId(connectionId)
@@ -43,20 +54,27 @@ export function Connection() {
   }
 
   const handlePasswordRequired = (connectionId: string) => {
-    setPasswordPromptConnectionId(connectionId)
+    const catalogId = connections[connectionId]?.catalogId
+    const prompt: ConnectionPrompt = catalogId !== undefined
+      ? { kind: "catalog", id: catalogId } : { kind: "connection", id: connectionId }
+    if (discoveryId) dispatch(clearEndpointDiscovery({ discoveryId }))
+    setDiscoveryId(undefined)
+    setPasswordPrompt(prompt)
   }
 
-  const handlePasswordSubmit = async (password: string) => {
-    if (!passwordPromptConnectionId) return
-    const connection = connections[passwordPromptConnectionId]
-    if (!connection) return
+  const handlePasswordSubmit = async (password: string, username?: string) => {
+    if (!passwordPrompt) return
+    if (discoveryId) dispatch(clearEndpointDiscovery({ discoveryId }))
+    const attemptId = nanoid()
+    setDiscoveryId(attemptId)
     const result = await secureStorage.encryptForStorage(password)
     if (!result.ok && secureStorage.isElectron()) toast.warning(PASSWORD_NOT_STORED_WARNING, { duration: 10_000 })
-    dispatch(connectPending({
-      connectionId: passwordPromptConnectionId,
-      connectionDetails: { ...connection.connectionDetails, password: result.ok ? result.value : password },
+    dispatch(passwordConnectionRequested({
+      prompt: passwordPrompt,
+      discoveryId: attemptId,
+      username,
+      password: result.ok ? result.value : password,
       isPasswordEncrypted: result.ok,
-      preservedHistory: connection.connectionHistory,
     }))
   }
 
@@ -69,23 +87,22 @@ export function Connection() {
       connection.status === CONNECTED),
   )
 
-  const promptedConnection = connections[passwordPromptConnectionId as string]
-  const isPromptConnecting = promptedConnection?.status === CONNECTING
-  const promptErrorMessage = promptedConnection?.errorMessage
+  const isPromptConnecting = promptedConnection?.status === CONNECTING || discovery?.status === "pending"
+  const promptErrorMessage = promptedConnection?.errorMessage || discovery?.errorMessage
   const promptConnectionLabel = promptedConnection
     ? promptedConnection.connectionDetails.alias
       || `${promptedConnection.connectionDetails.host}:${promptedConnection.connectionDetails.port}`
     : ""
 
-  // filter based on connections that connected at least once (have history) then sort by history length
-  const connectionsWithHistory = Object.entries(connections)
-    .filter(([, connection]) => (connection.connectionHistory ?? []).length > 0)
+  // Preconfigured entries are visible before their first connection; manual entries still require history.
+  const visibleConnections = Object.entries(connections)
+    .filter(([, connection]) => connection.preconfigured || (connection.connectionHistory ?? []).length > 0)
     .sort(([, a], [, b]) =>
       (b.connectionHistory?.length ?? 0) - (a.connectionHistory?.length ?? 0),
     )
 
   // grouping connections
-  const { clusterGroups, standaloneConnections } = connectionsWithHistory.reduce<{
+  const { clusterGroups, standaloneConnections } = visibleConnections.reduce<{
     clusterGroups: Record<string, Array<{ connectionId: string; connection: ConnectionState }>>
     standaloneConnections: Array<{ connectionId: string; connection: ConnectionState }>
   }>(
@@ -100,7 +117,7 @@ export function Connection() {
     { clusterGroups: {}, standaloneConnections: [] },
   )
 
-  const hasConnectionsWithHistory = connectionsWithHistory.length > 0
+  const hasConnections = visibleConnections.length > 0
 
   // Filter by search query
   const q = searchQuery.toLowerCase()
@@ -138,7 +155,7 @@ export function Connection() {
         <Typography className="flex items-center gap-2" variant="heading">
           <HousePlug size={20} /> Connections
         </Typography>
-        {hasConnectionsWithHistory && (
+        {hasConnections && (
           <Button
             onClick={() => setShowConnectionForm(!showConnectionForm)}
             size="sm"
@@ -151,16 +168,21 @@ export function Connection() {
 
       {showConnectionForm && <ConnectionForm onClose={() => setShowConnectionForm(false)} />}
       {showEditForm && <EditForm connectionId={editingConnectionId} onClose={handleCloseEditForm} />}
-      <PasswordPromptModal
+      {passwordPrompt !== undefined && promptedConnection && promptedConnection.status !== CONNECTED && <PasswordPromptModal
         connectionLabel={promptConnectionLabel}
+        defaultUsername={promptedConnection?.preconfigured ? promptedConnection.connectionDetails.username ?? "default" : undefined}
         errorMessage={promptErrorMessage}
         isConnecting={isPromptConnecting}
-        onClose={() => setPasswordPromptConnectionId(undefined)}
+        key={`${passwordPrompt.kind}:${passwordPrompt.id}`}
+        onClose={() => {
+          if (discoveryId) dispatch(clearEndpointDiscovery({ discoveryId }))
+          setPasswordPrompt(undefined)
+        }}
         onSubmit={handlePasswordSubmit}
-        open={passwordPromptConnectionId !== undefined && promptedConnection?.status !== CONNECTED}
-      />
+        open
+      />}
 
-      {!hasConnectionsWithHistory ? (
+      {!hasConnections ? (
         <EmptyState
           action={
             <Button

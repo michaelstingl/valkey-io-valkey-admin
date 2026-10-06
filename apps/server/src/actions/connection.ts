@@ -1,11 +1,13 @@
 import { GlideClusterClient } from "@valkey/valkey-glide"
-import { EndpointType, toNodeId } from "valkey-common"
+import { EndpointType, toNodeId, buildConnectionId } from "valkey-common"
 import { VALKEY } from "valkey-common"
-import { connectToValkey, teardownConnection  } from "../connection"
+import { connectToValkey, getExistingConnection, teardownConnection  } from "../connection"
 import { unsubscribe, getWatcherCount } from "../node-watchers"
 import { type Deps, withDeps } from "./utils"
 import { setClusterDashboardData } from "../set-dashboard-data"
-import { authorizeConnection, isConnectionAuthorized, revokeConnection, hasAuthorizedSession } from "../session"
+import {
+  authorizeConnection, isConnectionAuthorized, revokeConnection, hasAuthorizedSession, rememberCatalogNode, getCatalogNode, getCatalogDiscovery
+} from "../session"
 
 export interface ConnectionDetails {
   host: string;
@@ -27,6 +29,8 @@ export interface ConnectionDetails {
 }
 
 type ConnectPayload = {
+  catalogId?: string,
+  discoveryId?: string,
   connectionDetails: ConnectionDetails,
   connectionId: string,
   isRetry?: boolean,
@@ -34,7 +38,7 @@ type ConnectPayload = {
 }
 
 export const connectPending = withDeps<Deps, void>(
-  async ({ ws, clients, action, connectedNodesByCluster, metricsServerMap, clusterNodesRegistry, sessionId }) => {
+  async ({ ws, clients, action, connectedNodesByCluster, metricsServerMap, clusterNodesRegistry, sessionId, catalog }) => {
     const payload = action.payload as ConnectPayload
     const { connectionId } = payload
 
@@ -72,13 +76,69 @@ export const connectPending = withDeps<Deps, void>(
       return
     }
 
+    const candidate = !payload.isResume && payload.catalogId !== undefined
+      ? catalog?.find((entry) => (entry.catalogId ?? entry.connectionId) === payload.catalogId,
+      )
+      : undefined
+    const discovery = candidate?.connectionDetails.endpointType === "cluster-endpoint"
+      ? getCatalogDiscovery(sessionId, payload.catalogId!) : undefined
+    const source = candidate && (candidate.connectionDetails.endpointType === "node"
+      ? candidate.connectionId === connectionId
+      : discovery?.node && discovery.discoveryId === payload.discoveryId && discovery.revision === candidate.revision
+        && buildConnectionId(discovery.node.host, discovery.node.port, candidate.connectionDetails.db) === connectionId)
+      ? candidate : undefined
+    if (!payload.isResume && payload.catalogId !== undefined && !source) {
+      ws.send(JSON.stringify({
+        type: VALKEY.CONNECTION.connectRejected,
+        payload: { connectionId, errorMessage: "Preconfigured connection changed or was removed. Please select it again." },
+      }))
+      return
+    }
+    const connectionPayload = source
+      ? { ...payload, connectionDetails: {
+        ...source.connectionDetails,
+        ...(discovery?.node && { ...discovery.node, endpointType: "node" as const }),
+        username: discovery?.node ? discovery.node.username : payload.connectionDetails.username ?? source.connectionDetails.username,
+        password: payload.connectionDetails.password,
+      } }
+      : payload
+    if (source && !payload.isRetry) {
+      // Canonical settings must not label a previously authenticated client with a new revision.
+      // Include DNS aliases in this check, matching connectToValkey's reuse rules.
+      try {
+        const existing = await getExistingConnection({ ...connectionPayload, sessionId }, clients)
+        if (existing && getCatalogNode(sessionId, payload.catalogId!)?.revision !== source.revision) {
+          ws.send(JSON.stringify({
+            type: VALKEY.CONNECTION.connectRejected,
+            payload: { connectionId, errorMessage: "Preconfigured connection changed. Disconnect the existing connection and try again." },
+          }))
+          return
+        }
+      } catch {
+        ws.send(JSON.stringify({
+          type: VALKEY.CONNECTION.connectRejected,
+          payload: { connectionId, errorMessage: "Unable to resolve the preconfigured connection. Please try again." },
+        }))
+        return
+      }
+    }
+
     const client = await connectToValkey(
       { clients, connectedNodesByCluster, clusterNodesRegistry, metricsServerMap },
       ws,
-      { ...payload, sessionId },
+      { ...connectionPayload, sessionId },
+      source ? () => {
+        if (discovery && getCatalogDiscovery(sessionId, payload.catalogId!) !== discovery) {
+          throw new Error("Preconfigured connection attempt was superseded. Please select it again.")
+        }
+        authorizeConnection(sessionId, connectionId)
+        authorizeConnection(sessionId, toNodeId(connectionId))
+        rememberCatalogNode(sessionId, source.catalogId ?? source.connectionId, connectionPayload.connectionDetails, source.revision)
+      } : undefined,
     )
 
     if (client) {
+      if (discovery && getCatalogDiscovery(sessionId, payload.catalogId!) !== discovery) return
       authorizeConnection(sessionId, connectionId)
       authorizeConnection(sessionId, toNodeId(connectionId))
     }

@@ -23,6 +23,8 @@ export const makeNamespace = <
 
 export const VALKEY = {
   CONNECTION: makeNamespace("valkeyConnection", {
+    catalogRequested: "catalogRequested",
+    catalogFulfilled: "catalogFulfilled",
     connectPending: "connectPending",
     standaloneConnectFulfilled: "standaloneConnectFulfilled",
     clusterConnectFulfilled: "clusterConnectFulfilled",

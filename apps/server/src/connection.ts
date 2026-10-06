@@ -143,12 +143,13 @@ export async function connectToValkey(
     isRetry?: boolean
     sessionId: string
   },
+  beforeCommit?: () => void,
 ) {
   const { connectionId } = payload
   const priorConnect = connectInFlight.get(connectionId) ?? Promise.resolve()
   // .catch swallows the prior connect's failure so our turn still runs.
   const currentConnect = priorConnect.catch(() => {}).then(() =>
-    connectToValkeyLocked(ctx, ws, payload),
+    connectToValkeyLocked(ctx, ws, payload, beforeCommit),
   )
   connectInFlight.set(connectionId, currentConnect)
   try {
@@ -169,6 +170,7 @@ async function connectToValkeyLocked(
     isRetry?: boolean
     sessionId: string
   },
+  beforeCommit?: () => void,
 ) {
   const { clients, clusterNodesRegistry, metricsServerMap } = ctx
 
@@ -234,13 +236,13 @@ async function connectToValkeyLocked(
         const discoveredClusterNodes =
           clusterNodesRegistry.get(clusterId) ??
           (await discoverCluster(clusterClient, payload)).discoveredClusterNodes
-        return commitClusterConnection(ctx, ws, {
+        return await commitClusterConnection(ctx, ws, {
           clusterClient,
           clusterId,
           connectionId,
           seedAddress: addresses[0],
           discoveredClusterNodes,
-        })
+        }, beforeCommit)
       }
       const existingStandalone = existingConnection.client as GlideClient
       const [keyEvictionPolicy, jsonModuleAvailable, existingDatabasesCount] = await Promise.all([
@@ -248,6 +250,7 @@ async function connectToValkeyLocked(
         checkJsonModuleAvailability(existingStandalone, connectionId),
         getDatabasesCount(existingStandalone),
       ])
+      beforeCommit?.()
       sendStandaloneConnectFulfilled(ws, {
         connectionId,
         connectionDetails: {
@@ -357,20 +360,18 @@ async function connectToValkeyLocked(
       }
 
       try {
-        clusterCredentials.set(clusterId, payload.connectionDetails.password)
-        clusterNodesRegistry.set(clusterId, discoveredClusterNodes)
-
-        if (isWebMode) {
-          reconcileClusterMetricsServers(metricsServerMap)
-        }
-
         await commitClusterConnection(ctx, ws, {
           clusterClient,
           clusterId,
           connectionId,
           seedAddress: addresses[0],
           discoveredClusterNodes,
-        })
+        }, beforeCommit)
+
+        clusterCredentials.set(clusterId, payload.connectionDetails.password)
+        if (isWebMode) {
+          reconcileClusterMetricsServers(metricsServerMap)
+        }
 
         if (payload.isRetry && existingClusterConnection) {
           updateClusterNodesClient(clients, existingClusterConnection, clusterClient)
@@ -428,12 +429,12 @@ async function connectToValkeyLocked(
 
     console.log("Connected to standalone")
 
-    subscribe(payload.connectionId, ws)
-
     const [keyEvictionPolicy, jsonModuleAvailable] = await Promise.all([
       getKeyEvictionPolicy(standaloneClient),
       checkJsonModuleAvailability(standaloneClient, connectionId),
     ])
+    beforeCommit?.()
+    subscribe(payload.connectionId, ws)
     sendStandaloneConnectFulfilled(ws, {
       connectionId,
       connectionDetails: {
@@ -488,8 +489,9 @@ async function connectToValkeyLocked(
 
 export async function discoverTopology(
   ws: WebSocket,
-  payload: { discoveryId: string; connectionDetails: ConnectionDetails },
-): Promise<void> {
+  payload: { discoveryId: string; connectionDetails: ConnectionDetails; catalogId?: string; catalogRevision?: string },
+  acceptNodes?: (nodes: Record<string, { host: string; port: number }>) => boolean,
+) {
   const { discoveryId, connectionDetails } = payload
   const {
     host, port, username, password, tls: useTLS,
@@ -527,12 +529,18 @@ export async function discoverTopology(
     if (Object.keys(discoveredClusterNodes).length < 1) {
       throw new Error("Unable to discover cluster")
     }
+    if (acceptNodes && !acceptNodes(discoveredClusterNodes)) return
     ws.send(
       JSON.stringify({
         type: VALKEY.TOPOLOGY.discoveryEndpointFulfilled,
-        payload: { discoveryId, clusterNodes: discoveredClusterNodes },
+        payload: { discoveryId, clusterNodes: discoveredClusterNodes,
+          ...(payload.catalogId !== undefined && {
+            connectionDetails: { ...connectionDetails, password: undefined }, catalogRevision: payload.catalogRevision,
+          }),
+        },
       }),
     )
+    return discoveredClusterNodes
   } catch (err) {
     console.error("Error discovering topology", err)
     const errorMessage = err instanceof Error ? err.message : String(err)
@@ -576,6 +584,7 @@ async function commitClusterConnection(
   ctx: ConnectionContext,
   ws: WebSocket,
   commit: ClusterCommit,
+  beforeCommit?: () => void,
 ): Promise<GlideClusterClient> {
   const { clients, connectedNodesByCluster, clusterNodesRegistry } = ctx
   const { clusterClient, clusterId, connectionId, seedAddress, discoveredClusterNodes } = commit
@@ -587,6 +596,7 @@ async function commitClusterConnection(
     getDatabasesCount(clusterClient, ["cluster-databases", "databases"]),
   ])
 
+  beforeCommit?.()
   clusterNodesRegistry.set(clusterId, discoveredClusterNodes)
   clients.set(connectionId, { client: clusterClient, clusterId })
 

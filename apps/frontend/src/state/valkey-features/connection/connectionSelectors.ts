@@ -8,6 +8,15 @@ export const atId = R.curry((id: string, state: RootState) => R.path([VALKEY.CON
 export const selectStatus = (id: string) => (state: RootState) => atId(id, state)?.status
 export const selectConnectionDetails = (id: string) => (state: RootState) => atId(id, state)?.connectionDetails
 export const selectConnections = (state: RootState) => state[VALKEY.CONNECTION.name].connections
+export type ConnectionPrompt = { kind: "catalog" | "connection"; id: string }
+export const selectPromptedConnection = (prompt: ConnectionPrompt | undefined) => (state: Pick<RootState, "valkeyConnection">) => {
+  if (!prompt) return undefined
+  const connections = state.valkeyConnection.connections
+  return prompt.kind === "connection" ? connections[prompt.id]
+    : Object.values(connections).find((connection) => connection.preconfigured && connection.catalogId === prompt.id)
+}
+export const selectPromptDiscovery = (discoveryId: string | undefined) => (state: Pick<RootState, "valkeyTopology">) =>
+  discoveryId ? state.valkeyTopology.discoveries[discoveryId] : undefined
 export const selectConnectionCount = (state: RootState) =>
   Object.values(selectConnections(state)).filter(
     (connection) => connection.status === CONNECTED,
@@ -35,4 +44,3 @@ export const selectClusterDb = (clusterId: string) => (state: RootState) =>
 
 export const selectClusterAlias = (id: string) => (state: RootState) =>
   atId(id, state)?.connectionDetails?.alias
-

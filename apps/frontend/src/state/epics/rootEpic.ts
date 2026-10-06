@@ -1,5 +1,8 @@
 import { merge } from "rxjs"
 import { wsConnectionEpic } from "./wsEpics"
+import { catalogResumeEpic } from "./catalogResumeEpic"
+import { catalogSyncEpic } from "./catalogSyncEpic"
+import { passwordConnectionEpic } from "./passwordConnectionEpic"
 import {
   connectionEpic,
   sendRequestEpic,
@@ -27,6 +30,9 @@ export const registerEpics = (store: Store) => {
   merge(
     wsConnectionEpic(store),
     connectionEpic(store),
+    catalogSyncEpic(store),
+    catalogResumeEpic(store),
+    passwordConnectionEpic(store),
     autoReconnectEpic(store),
     autoResumeEpic(store),
     valkeyRetryEpic(store),

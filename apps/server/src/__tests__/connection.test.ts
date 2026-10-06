@@ -16,11 +16,113 @@ import {
 } from "../connection"
 import { resolveHostnameOrIpAddress, dns } from "../utils"
 import { checkJsonModuleAvailability } from "../check-json-module"
-import { ConnectionDetails } from "../actions/connection"
-import { type MetricsServerMap } from "../metrics-orchestrator"
+import { ConnectionDetails, connectPending } from "../actions/connection"
+import { topologyDiscoveryEndpointPending } from "../actions/topology"
+import { parseConnectionCatalog } from "../connection-catalog"
+import { __test__ as metricsInternals, type MetricsServerMap } from "../metrics-orchestrator"
 import { _reset as resetNodeWatchers } from "../node-watchers"
-import { ensureSession, authorizeConnection, _resetSessions } from "../session"
+import { ensureSession, authorizeConnection, _resetSessions, getCatalogNode, rememberCatalogNode } from "../session"
 import type { IncomingMessage } from "http"
+
+// Connection tests exercise Valkey clients, not spawned metrics processes.
+beforeEach(() => {
+  mock.method(metricsInternals, "spawnProcess", () => ({ on() {}, stderr: null }) as any)
+})
+afterEach(() => mock.restoreAll())
+
+describe("preconfigured direct-node connect action", () => {
+  beforeEach(() => { _resetSessions(); resetNodeWatchers(); _resetConnectInFlight() })
+  afterEach(() => { _resetSessions(); resetNodeWatchers(); mock.restoreAll() })
+
+  const setup = () => {
+    const catalog = parseConnectionCatalog([{
+      id: "source", host: "127.0.0.1", port: "6379", username: "current-user", tls: true,
+    }])
+    const source = catalog[0]
+    const sessionId = ensureSession({ headers: {}, socket: {} } as IncomingMessage).sessionId
+    const messages: any[] = []
+    const clients = new Map<string, any>()
+    const deps = { catalog, sessionId, clients, connectionId: source.connectionId,
+      ws: { send: (message: string) => messages.push(JSON.parse(message)) } as any,
+      connectedNodesByCluster: new Map(), metricsServerMap: new Map(), clusterNodesRegistry: new Map() }
+    deps.metricsServerMap.set(toNodeId(source.connectionId), {
+      metricsURI: "http://localhost:1234", pid: 12345, lastSeen: Date.now(),
+    })
+    const action = { type: VALKEY.CONNECTION.connectPending, meta: undefined, payload: {
+      catalogId: "source", connectionId: source.connectionId,
+      connectionDetails: { ...source.connectionDetails, username: "outdated-user", tls: false,
+        verifyTlsCertificate: false, caCertPath: "/must-not-read", password: "user-password" },
+    } }
+    return { deps, action, messages, source }
+  }
+
+  it("authenticates with user-supplied credentials and current catalog endpoint settings", async () => {
+    const { deps, action, messages, source } = setup()
+    await withMockedClients(buildStandaloneMock(), null, async () => {
+      await connectPending(deps)(action)
+      const options = (GlideClient.createClient as any).mock.calls[0].arguments[0]
+      assert.deepStrictEqual(options.credentials, { username: "outdated-user", password: "user-password" })
+      assert.strictEqual(options.useTLS, true)
+      assert.strictEqual(options.advancedConfiguration.tlsAdvancedConfiguration, undefined)
+      assert.strictEqual(messages.at(-1).type, VALKEY.CONNECTION.standaloneConnectFulfilled)
+      assert.strictEqual(getCatalogNode(deps.sessionId, "source")?.revision, source.revision)
+      assert.strictEqual(getCatalogNode(deps.sessionId, "source")?.username, "outdated-user")
+    })
+  })
+
+  it("uses the chosen username during discovery while preserving catalog endpoint settings", async () => {
+    const { deps, action } = setup()
+    const request = { ...action, payload: { ...action.payload, discoveryId: "reader-discovery" } }
+    await withMockedClients(buildStandaloneMock({ clusterEnabled: "1" }), null, async () => {
+      await topologyDiscoveryEndpointPending(deps)(request)
+      const options = (GlideClient.createClient as any).mock.calls[0].arguments[0]
+      assert.deepStrictEqual(options.credentials, { username: "outdated-user", password: "user-password" })
+      assert.strictEqual(options.useTLS, true)
+      assert.strictEqual(getCatalogNode(deps.sessionId, "source"), undefined)
+    })
+  })
+
+  it("rejects deleted or retargeted sources without creating a client or binding", async () => {
+    for (const deleted of [true, false]) {
+      const { deps, action, messages } = setup()
+      deps.catalog = deleted ? [] : parseConnectionCatalog([{ id: "source", host: "127.0.0.2", port: "6379" }])
+      await withMockedClients(buildStandaloneMock(), null, async () => {
+        await connectPending(deps)(action)
+        assert.strictEqual((GlideClient.createClient as any).mock.calls.length, 0)
+        assert.strictEqual(messages.at(-1).type, VALKEY.CONNECTION.connectRejected)
+        assert.strictEqual(getCatalogNode(deps.sessionId, "source"), undefined)
+      })
+    }
+  })
+
+  it("does not relabel an old authenticated cached client with the latest revision", async () => {
+    const { deps, action, source, messages } = setup()
+    deps.clients.set(source.connectionId, { client: buildStandaloneMock() })
+    authorizeConnection(deps.sessionId, source.connectionId)
+    rememberCatalogNode(deps.sessionId, "source", source.connectionDetails, "previous-revision")
+    await withMockedClients(buildStandaloneMock(), null, async () => {
+      await connectPending(deps)(action)
+      assert.strictEqual(messages.at(-1).type, VALKEY.CONNECTION.connectRejected)
+      assert.strictEqual(getCatalogNode(deps.sessionId, "source")?.revision, "previous-revision")
+    })
+  })
+
+  it("keeps resume ownership checks and never stamps a new source revision on resume", async () => {
+    const { deps, action, source, messages } = setup()
+    const resume = { ...action, payload: { ...action.payload, isResume: true } }
+    deps.clients.set(source.connectionId, { client: buildStandaloneMock() })
+    await withMockedClients(buildStandaloneMock(), null, async () => {
+      await connectPending(deps)(resume)
+      assert.strictEqual(messages.at(-1).payload.requiresAuth, true)
+      authorizeConnection(deps.sessionId, source.connectionId)
+      rememberCatalogNode(deps.sessionId, "source", source.connectionDetails, "previous-revision")
+      await connectPending(deps)(resume)
+      assert.strictEqual(messages.at(-1).type, VALKEY.CONNECTION.standaloneConnectFulfilled)
+      assert.strictEqual((GlideClient.createClient as any).mock.calls.length, 0)
+      assert.strictEqual(getCatalogNode(deps.sessionId, "source")?.revision, "previous-revision")
+    })
+  })
+})
 
 const DEFAULT_PAYLOAD = {
   connectionDetails: {

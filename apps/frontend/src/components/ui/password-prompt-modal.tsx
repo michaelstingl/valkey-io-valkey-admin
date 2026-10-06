@@ -11,7 +11,8 @@ import { cn } from "@/lib/utils"
 interface PasswordPromptModalProps {
   open: boolean
   onClose: () => void
-  onSubmit: (password: string) => void
+  onSubmit: (password: string, username?: string) => void
+  defaultUsername?: string
   isConnecting?: boolean
   errorMessage?: string | null
   connectionLabel: string
@@ -24,8 +25,11 @@ export function PasswordPromptModal({
   isConnecting = false,
   errorMessage,
   connectionLabel,
+  defaultUsername,
 }: PasswordPromptModalProps) {
   const [password, setPassword] = useState("")
+  const [username, setUsername] = useState(defaultUsername ?? "")
+  const canChooseUsername = defaultUsername !== undefined
 
   // Clear password when error changes (wrong password)
   useEffect(() => {
@@ -34,11 +38,13 @@ export function PasswordPromptModal({
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault()
-    onSubmit(password)
+    if (canChooseUsername) onSubmit(password, username)
+    else onSubmit(password)
   }
 
   const handleClose = () => {
     setPassword("")
+    setUsername(defaultUsername ?? "")
     onClose()
   }
 
@@ -54,7 +60,7 @@ export function PasswordPromptModal({
           )} onSubmit={handleSubmit}>
             <div className="flex justify-between">
               <Dialog.Title asChild>
-                <Typography variant="subheading">Password Required</Typography>
+                <Typography variant="subheading">{canChooseUsername ? "Authentication Required" : "Password Required"}</Typography>
               </Dialog.Title>
               <Dialog.Close asChild>
                 <Button className="hover:text-primary h-auto p-0" variant="ghost">
@@ -64,7 +70,7 @@ export function PasswordPromptModal({
             </div>
             <Dialog.Description asChild>
               <Typography variant="bodySm">
-                Enter password for{" "}
+                {canChooseUsername ? "Enter username and password for " : "Enter password for "}
                 <strong>
                   {connectionLabel.split(".").map((part, i, arr) => (
                     <span key={i}>
@@ -83,6 +89,18 @@ export function PasswordPromptModal({
               <Alert variant="destructive">
                 <AlertDescription>{errorMessage}</AlertDescription>
               </Alert>
+            )}
+            {canChooseUsername && (
+              <div>
+                <Label className="block mb-1" htmlFor="prompt-username">Username</Label>
+                <Input
+                  autoComplete="username"
+                  id="prompt-username"
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                  value={username}
+                />
+              </div>
             )}
             <div>
               <Label className="block mb-1" htmlFor="prompt-password">

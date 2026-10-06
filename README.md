@@ -27,6 +27,8 @@ The Add Connection modal accepts both single-node and cluster discovery endpoint
 
 For the full walkthrough see the [connection docs](https://valkey-admin.valkey.io/configuration/shared/).
 
+In Web mode, `VALKEY_ADMIN_CONNECTIONS_FILE` supplies preconfigured connections from a JSON catalog. Users select a connection, keep or change the prefilled username, and enter their password. valkey-admin refreshes the list automatically. See [preconfigured connection settings](https://valkey-admin.valkey.io/configuration/server/#preconfigured-connections).
+
 ## Getting Started
 
 **Documentation:** [valkey-admin.valkey.io](https://valkey-admin.valkey.io/introduction/)

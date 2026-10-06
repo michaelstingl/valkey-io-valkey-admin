@@ -14,6 +14,7 @@ import {
 import { fileURLToPath } from "url"
 import rateLimit from "express-rate-limit"
 import { connectPending, resetConnection, closeConnection } from "./actions/connection"
+import { createConnectionCatalogReader, getSessionConnectionCatalog } from "./connection-catalog"
 import { topologyDiscoveryEndpointPending } from "./actions/topology"
 import { sendRequested } from "./actions/command"
 import { setData } from "./actions/stats"
@@ -99,6 +100,8 @@ const orchestratorLimiter = rateLimit({
   legacyHeaders: false,
 })
 const app = express()
+const readCatalog = createConnectionCatalogReader(process.env.VALKEY_ADMIN_CONNECTIONS_FILE, process.env.DEPLOYMENT_MODE)
+let catalog = readCatalog()
 const port = Number(process.env.PORT) || 8080
 const server = http.createServer(app)
 // --- Serve frontend static files ---
@@ -286,6 +289,11 @@ wss.on("connection", (ws: AliveWebSocket) => {
   const connectedNodesByCluster: Map<string, string[]> = new Map()
 
   const handlers: Record<string, Handler> = {
+    [VALKEY.CONNECTION.catalogRequested]: ({ ws, sessionId, clients }) => async () => {
+      catalog = readCatalog()
+      const connections = getSessionConnectionCatalog(catalog, sessionId, new Set(clients.keys()))
+      safeSend(ws, JSON.stringify({ type: VALKEY.CONNECTION.catalogFulfilled, payload: { connections } }))
+    },
     [VALKEY.CONNECTION.connectPending]: connectPending,
     [VALKEY.CONNECTION.resetConnection]: resetConnection,
     [VALKEY.CONNECTION.closeConnection]: closeConnection,
@@ -395,7 +403,7 @@ wss.on("connection", (ws: AliveWebSocket) => {
           metricsServerMap,
           connectedNodesByCluster,
           clusterNodesRegistry,
-          sessionId: ws.sessionId })(action as ReduxAction)
+          sessionId: ws.sessionId, catalog })(action as ReduxAction)
     } catch (error) {
       console.error(`Error handling action ${action.type}:`, error)
     }

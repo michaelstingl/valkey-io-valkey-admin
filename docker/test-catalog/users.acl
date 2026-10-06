@@ -1,0 +1,2 @@
+user default off
+user reader on >catalog-reader-password ~* +@read +@connection +info +acl|whoami +config|get

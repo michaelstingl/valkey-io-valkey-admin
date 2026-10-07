@@ -134,6 +134,10 @@ const connectInFlight = new Map<string, Promise<GlideClient | GlideClusterClient
 
 export const _resetConnectInFlight = () => connectInFlight.clear()
 
+/**
+ * `beforeCommit` runs synchronously after async setup and before acknowledging success.
+ * It may throw to reject an attempt superseded while setup was in progress.
+ */
 export async function connectToValkey(
   ctx: ConnectionContext,
   ws: WebSocket,

@@ -138,6 +138,10 @@ const connectionSlice = createSlice({
     connections: currentConnections as ValkeyConnectionsState,
   },
   reducers: {
+    /**
+     * catalogSyncEpic removes changed entries before applying the snapshot,
+     * except in-flight attempts. Preserve the state of entries still present.
+     */
     catalogApplied: (state, action: PayloadAction<{ connections: CatalogConnection[] }>) => {
       for (const entry of action.payload.connections) {
         const { connectionId, connectionDetails, sourceConnectionDetails = connectionDetails, catalogId = connectionId, revision } = entry

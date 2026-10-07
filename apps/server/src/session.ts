@@ -114,7 +114,11 @@ export const rememberCatalogNode = (
 export const getCatalogNode = (sessionId: string | undefined, catalogId: string) =>
   getSession(sessionId)?.catalogNodes?.get(catalogId)
 
-// A pending discovery never replaces the authenticated catalog-to-node binding.
+/**
+ * A pending discovery never replaces the authenticated catalog-to-node binding.
+ * Each attempt gets a new object. Async completions compare object identity
+ * to reject results superseded by a later discovery.
+ */
 export const beginCatalogDiscovery = (sessionId: string | undefined, catalogId: string, discoveryId: string, revision?: string) => {
   const session = getSession(sessionId)
   if (!session) return undefined
